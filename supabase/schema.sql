@@ -5,14 +5,50 @@ create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   full_name text not null,
   role text not null default 'sa',
+  team text,
   regions text[] not null default '{}',
   solutions text[] not null default '{}',
   created_at timestamptz not null default now()
 );
+alter table public.profiles add column if not exists team text;
 alter table public.profiles add column if not exists solutions text[] not null default '{}';
 alter table public.profiles alter column role set default 'sa';
 alter table public.profiles drop constraint if exists profiles_role_check;
 alter table public.profiles add constraint profiles_role_check check (role in ('admin', 'sales', 'sa', 'member'));
+
+create or replace function public.handle_auth_user_signup()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  signup_role text := new.raw_user_meta_data ->> 'role';
+  signup_team text := nullif(trim(new.raw_user_meta_data ->> 'team'), '');
+  signup_name text := coalesce(nullif(trim(new.raw_user_meta_data ->> 'full_name'), ''), split_part(new.email, '@', 1));
+begin
+  if signup_role is null or signup_role not in ('sales', 'sa') then
+    raise exception 'Signup role must be sales or sa';
+  end if;
+
+  if signup_role = 'sales' and (signup_team is null or not (signup_team = any (array['강남 1팀','강남 2팀','강북 1팀','강북 2팀','전략 1팀','전략 2팀','전략 3팀']::text[]))) then
+    raise exception 'Invalid sales team';
+  end if;
+  if signup_role = 'sa' and (signup_team is null or not (signup_team = any (array['DXI 1팀','DXI 2팀','BS SA팀']::text[]))) then
+    raise exception 'Invalid SA team';
+  end if;
+
+  insert into public.profiles (id, full_name, role, team)
+  values (new.id, signup_name, signup_role, signup_team)
+  on conflict (id) do nothing;
+  return new;
+end;
+$$;
+
+drop trigger if exists on_auth_user_created_profile on auth.users;
+create trigger on_auth_user_created_profile
+  after insert on auth.users
+  for each row execute function public.handle_auth_user_signup();
 
 create table if not exists public.sales_leads (
   id uuid primary key default gen_random_uuid(),
@@ -89,9 +125,6 @@ grant select on public.profiles to authenticated;
 grant insert, update, delete on public.profiles to authenticated;
 grant select, insert, update, delete on public.sales_leads to authenticated;
 
--- Create team members under Authentication > Users first. For each Auth user, add
--- exactly one profile row in the Table Editor. Example template:
--- insert into public.profiles (id, full_name, role, regions)
--- values
---   ('AUTH_USER_UUID', '정가영', 'sales', '{}'),
---   ('ANOTHER_AUTH_USER_UUID', '박지호', 'sa', array['강북','인천']);
+-- Public signups create their profiles through the auth.users trigger above.
+-- To grant an existing user admin access, update their profile manually:
+-- update public.profiles set role = 'admin', team = null where id = 'AUTH_USER_UUID';
